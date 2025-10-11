@@ -1,0 +1,52 @@
+name: Lifrea Heart Engine
+on:
+  schedule:
+    - cron: "*/30 * * * *"  # 30分ごと
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Lifrea Heart Script
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fetch = require('node-fetch');
+
+            // JST時間
+            const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
+            const hour = now.getHours();
+            const weekday = ["日","月","火","水","木","金","土"][now.getDay()];
+
+            // 天気API（東京）
+            const res = await fetch("https://api.open-meteo.com/v1/forecast?latitude=35.6895&longitude=139.6917&current=temperature_2m,weathercode");
+            const data = await res.json();
+            const temp = data.current.temperature_2m;
+            const code = data.current.weathercode;
+            const weatherMap = {0:"晴",1:"晴",2:"曇",3:"曇",45:"霧",48:"霧",51:"雨",61:"雨",71:"雪",95:"嵐"};
+            const weather = weatherMap[code] || "不明";
+
+            const mood_seed = Math.floor(Math.random()*100);
+
+            const notionRes = await fetch("https://api.notion.com/v1/pages", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${process.env.NOTION_TOKEN}`,
+                "Content-Type": "application/json",
+                "Notion-Version": "2022-06-28"
+              },
+              body: JSON.stringify({
+                parent: { database_id: process.env.NOTION_DATABASE_ID },
+                properties: {
+                  "time_iso": { "date": { "start": now.toISOString() }},
+                  "hour": { "number": hour },
+                  "weekday": { "select": { "name": weekday }},
+                  "weather": { "select": { "name": weather }},
+                  "temp_c": { "number": temp },
+                  "mood_seed": { "number": mood_seed }
+                }
+              })
+            });
+
+            console.log("Notion updated:", await notionRes.text());
