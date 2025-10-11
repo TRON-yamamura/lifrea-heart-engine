@@ -2,8 +2,8 @@ name: Lifrea Heart Engine
 
 on:
   schedule:
-    - cron: "*/30 * * * *" # 30分ごと
-  workflow_dispatch:
+    - cron: "*/30 * * * *"  # 30分ごとに実行
+  workflow_dispatch:        # 手動実行も可
 
 jobs:
   update:
@@ -14,33 +14,57 @@ jobs:
         with:
           script: |
             const notion_token = process.env.NOTION_TOKEN;
-            const notion_db = process.env.NOTION_DATABASE_ID;
+            const notion_db    = process.env.NOTION_DATABASE_ID;
 
-            const fetch = (await import('node-fetch')).default;
-
-            const now = new Date();
+            // 現在時刻（JST）
+            const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
             const hour = now.getHours();
             const weekday = ["日","月","火","水","木","金","土"][now.getDay()];
-            const weather = "晴れ";
-            const temp = Math.floor(Math.random() * 10) + 20;
-            const mood_seed = Math.floor(Math.random() * 100);
 
+            // 天気・気温（Open-Meteo, 東京座標）
+            let weather = "晴";
+            let temp = null;
+            try {
+              const r = await fetch("https://api.open-meteo.com/v1/forecast?latitude=35.6895&longitude=139.6917&current=temperature_2m,weathercode");
+              const d = await r.json();
+              temp = d?.current?.temperature_2m ?? null;
+              const code = d?.current?.weathercode;
+              const map = {
+                0:"晴", 1:"晴",
+                2:"曇", 3:"曇",
+                45:"霧", 48:"霧",
+                51:"雨", 53:"雨", 55:"雨",
+                56:"雨", 57:"雨",
+                61:"雨", 63:"雨", 65:"雨",
+                66:"雨", 67:"雨",
+                71:"雪", 73:"雪", 75:"雪",
+                77:"雪",
+                80:"雨", 81:"雨", 82:"雨",
+                85:"雪", 86:"雪",
+                95:"嵐", 96:"嵐", 99:"嵐"
+              };
+              weather = map[code] || weather;
+            } catch (_) {
+              // 取得失敗時はデフォルト(晴)・tempはnullのまま
+            }
+
+            const mood_seed = Math.floor(Math.random()*100);
+
+            // Notionに1行追加（タイトルはAPI上は必ず "title" という名前で送る）
             const body = {
               parent: { database_id: notion_db },
               properties: {
-                title: {
-                  title: [{ text: { content: now.toISOString() } }]
-                },
-                time_iso: { date: { start: now.toISOString() }},
-                hour: { number: hour },
-                weekday: { select: { name: weekday }},
-                weather: { select: { name: weather }},
-                temp_c: { number: temp },
-                mood_seed: { number: mood_seed }
+                "title":   { "title": [ { "text": { "content": now.toISOString() } } ] },
+                "time_iso":{ "date":  { "start": now.toISOString() } },
+                "hour":    { "number": hour },
+                "weekday": { "select": { "name": weekday } },
+                "weather": { "select": { "name": weather } },
+                "temp_c":  { "number": temp },
+                "mood_seed": { "number": mood_seed }
               }
             };
 
-            await fetch("https://api.notion.com/v1/pages", {
+            const res = await fetch("https://api.notion.com/v1/pages", {
               method: "POST",
               headers: {
                 "Authorization": `Bearer ${notion_token}`,
@@ -49,3 +73,9 @@ jobs:
               },
               body: JSON.stringify(body)
             });
+
+            const text = await res.text();
+            core.info(`Notion response: ${text}`);
+            if (!res.ok) {
+              throw new Error(`Notion API error: ${res.status} ${res.statusText}`);
+            }
