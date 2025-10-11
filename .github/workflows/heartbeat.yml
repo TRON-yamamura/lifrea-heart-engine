@@ -13,42 +13,84 @@ jobs:
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         with:
           script: |
-            const dbid  = process.env.NOTION_DATABASE_ID;
             const token = process.env.NOTION_TOKEN;
+            let   dbid  = process.env.NOTION_DATABASE_ID;
 
-            // どのDBを見ているか確認
-            const db = await fetch(`https://api.notion.com/v1/databases/${dbid}`, {
-              headers: {
-                "Authorization": `Bearer ${token}`,
-                "Notion-Version": "2022-06-28"
+            const headers = {
+              "Authorization": `Bearer ${token}`,
+              "Notion-Version": "2022-06-28",
+              "Content-Type": "application/json"
+            };
+
+            const required = ["title","time_iso","hour","weekday","weather","temp_c","mood_seed"];
+
+            async function getDb(dbid){
+              const r = await fetch(`https://api.notion.com/v1/databases/${dbid}`, { headers });
+              if (!r.ok) return null;
+              return await r.json();
+            }
+
+            function hasRequired(db){
+              const keys = Object.keys(db?.properties || {});
+              return required.every(k => keys.includes(k));
+            }
+
+            // 1) まず Secrets の DB をチェック
+            let db = null;
+            if (dbid) {
+              db = await getDb(dbid);
+              if (db) console.log("DB properties (from secret):", Object.keys(db.properties || {}));
+              if (!db || !hasRequired(db)) db = null;
+            }
+
+            // 2) ダメなら workspace を検索して “英字7列DB” を自動選択
+            if (!db) {
+              console.log("Searching workspace for a database that has:", required);
+              const r = await fetch("https://api.notion.com/v1/search", {
+                method: "POST",
+                headers,
+                body: JSON.stringify({ filter: { value: "database", property: "object" }, page_size: 100 })
+              });
+              const data = await r.json();
+              if (!r.ok) throw new Error("Notion search failed: " + JSON.stringify(data));
+
+              for (const item of data.results || []) {
+                const candidate = await getDb(item.id.replace(/-/g, "")); // normalize
+                if (candidate && hasRequired(candidate)) {
+                  db = candidate;
+                  dbid = item.id.replace(/-/g, "");
+                  console.log("Auto-selected DB:", candidate.title?.[0]?.plain_text || "(no title)", dbid);
+                  console.log("DB properties:", Object.keys(candidate.properties || {}));
+                  break;
+                }
               }
-            }).then(r => r.json());
-            console.log("DB properties:", Object.keys(db.properties || {})); // ここに ["数値","曜日","日付","天候","タイトル"] が出ればOK
+            }
 
-            // JST 現在
+            if (!db) {
+              throw new Error("英字7列（" + required.join(", ") + "）を持つデータベースが見つかりません。NOTION_DATABASE_IDをそのDBのIDにして再実行してください。");
+            }
+
+            // 3) ページ作成
             const now = new Date();
-            const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+            const jst = new Date(now.getTime() + 9*60*60*1000);
             const weekdays = ["日","月","火","水","木","金","土"];
 
-            // ★日本語5列DBに合わせたプロパティ名で送る★
             const body = {
               parent: { database_id: dbid },
               properties: {
-                "タイトル": { "title": [ { "text": { "content": "Lifrea Heartbeat" } } ] },
-                "日付":    { "date":  { "start": jst.toISOString() } },
-                "曜日":    { "select": { "name": weekdays[jst.getDay()] } },
-                "天候":    { "select": { "name": "晴" } },
-                "数値":    { "number": jst.getHours() }
+                title:    { title: [{ text: { content: "Lifrea Heartbeat" } }] },
+                time_iso: { date:  { start: jst.toISOString() } },
+                hour:     { number: jst.getHours() },
+                weekday:  { select: { name: weekdays[jst.getDay()] } },
+                weather:  { select: { name: "晴" } },
+                temp_c:   { number: 23 },
+                mood_seed:{ number: Math.floor(Math.random()*100) }
               }
             };
 
             const res = await fetch("https://api.notion.com/v1/pages", {
               method: "POST",
-              headers: {
-                "Authorization": `Bearer ${token}`,
-                "Notion-Version": "2022-06-28",
-                "Content-Type": "application/json"
-              },
+              headers,
               body: JSON.stringify(body)
             });
 
