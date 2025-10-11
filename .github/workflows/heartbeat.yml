@@ -1,12 +1,11 @@
-name: Lifrea Heart Engine
-on:
-  workflow_dispatch:
+name: Lifrea Heart Engine (list DBs)
+on: workflow_dispatch
 
 jobs:
-  update:
+  list:
     runs-on: ubuntu-latest
     steps:
-      - name: Call Lifrea Heart Script
+      - name: List Notion databases visible to this integration
         uses: actions/github-script@v6
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
@@ -14,86 +13,34 @@ jobs:
         with:
           script: |
             const token = process.env.NOTION_TOKEN;
-            let   dbid  = process.env.NOTION_DATABASE_ID;
-
             const headers = {
               "Authorization": `Bearer ${token}`,
               "Notion-Version": "2022-06-28",
               "Content-Type": "application/json"
             };
 
-            const required = ["title","time_iso","hour","weekday","weather","temp_c","mood_seed"];
-
-            async function getDb(dbid){
-              const r = await fetch(`https://api.notion.com/v1/databases/${dbid}`, { headers });
+            async function getDb(id){
+              const r = await fetch(`https://api.notion.com/v1/databases/${id}`, { headers });
               if (!r.ok) return null;
               return await r.json();
             }
 
-            function hasRequired(db){
-              const keys = Object.keys(db?.properties || {});
-              return required.every(k => keys.includes(k));
-            }
-
-            // 1) まず Secrets の DB をチェック
-            let db = null;
-            if (dbid) {
-              db = await getDb(dbid);
-              if (db) console.log("DB properties (from secret):", Object.keys(db.properties || {}));
-              if (!db || !hasRequired(db)) db = null;
-            }
-
-            // 2) ダメなら workspace を検索して “英字7列DB” を自動選択
-            if (!db) {
-              console.log("Searching workspace for a database that has:", required);
-              const r = await fetch("https://api.notion.com/v1/search", {
-                method: "POST",
-                headers,
-                body: JSON.stringify({ filter: { value: "database", property: "object" }, page_size: 100 })
-              });
-              const data = await r.json();
-              if (!r.ok) throw new Error("Notion search failed: " + JSON.stringify(data));
-
-              for (const item of data.results || []) {
-                const candidate = await getDb(item.id.replace(/-/g, "")); // normalize
-                if (candidate && hasRequired(candidate)) {
-                  db = candidate;
-                  dbid = item.id.replace(/-/g, "");
-                  console.log("Auto-selected DB:", candidate.title?.[0]?.plain_text || "(no title)", dbid);
-                  console.log("DB properties:", Object.keys(candidate.properties || {}));
-                  break;
-                }
-              }
-            }
-
-            if (!db) {
-              throw new Error("英字7列（" + required.join(", ") + "）を持つデータベースが見つかりません。NOTION_DATABASE_IDをそのDBのIDにして再実行してください。");
-            }
-
-            // 3) ページ作成
-            const now = new Date();
-            const jst = new Date(now.getTime() + 9*60*60*1000);
-            const weekdays = ["日","月","火","水","木","金","土"];
-
-            const body = {
-              parent: { database_id: dbid },
-              properties: {
-                title:    { title: [{ text: { content: "Lifrea Heartbeat" } }] },
-                time_iso: { date:  { start: jst.toISOString() } },
-                hour:     { number: jst.getHours() },
-                weekday:  { select: { name: weekdays[jst.getDay()] } },
-                weather:  { select: { name: "晴" } },
-                temp_c:   { number: 23 },
-                mood_seed:{ number: Math.floor(Math.random()*100) }
-              }
-            };
-
-            const res = await fetch("https://api.notion.com/v1/pages", {
+            // まず search で DB 一覧を取得
+            const r = await fetch("https://api.notion.com/v1/search", {
               method: "POST",
               headers,
-              body: JSON.stringify(body)
+              body: JSON.stringify({ filter: { value: "database", property: "object" }, page_size: 100 })
             });
+            const data = await r.json();
+            if (!r.ok) throw new Error("Notion search failed: " + JSON.stringify(data));
 
-            const text = await res.text();
-            console.log("Result:", text);
-            if (!res.ok) throw new Error(`Notion API error: ${res.status} ${text}`);
+            console.log("=== Databases visible to this integration ===");
+            for (const item of data.results || []) {
+              const normId = item.id.replace(/-/g, "");
+              const title  = (item.title?.[0]?.plain_text || "(no title)").trim();
+              const dbinfo = await getDb(normId);
+              const props  = Object.keys(dbinfo?.properties || {});
+              console.log(`- title="${title}"  id=${normId}  props=${JSON.stringify(props)}`);
+            }
+            console.log("============================================");
+            throw new Error("Stop after listing (copy the id for the English 7-column DB).");
