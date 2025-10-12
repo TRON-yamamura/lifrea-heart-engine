@@ -2,7 +2,7 @@ name: Lifrea Heart Engine (update)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *" # 毎時0分に実行（UTC→JST+9なので実質9時ごと）
+    - cron: "0 * * * *" # 毎時0分（UTC基準）→ 日本時間で毎時9分に相当
 
 jobs:
   update:
@@ -14,23 +14,22 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
-          WEATHER_CITY: "Tokyo"      # ←ここを自分の都市に変更可能（例: Osaka, Sapporo）
+          WEATHER_CITY: "Tokyo"      # ← 都市名を変えるならここ
           WEATHER_COUNTRY: "jp"
         with:
           script: |
-            const fetch = global.fetch || (await import('node-fetch')).default;
             const { NOTION_TOKEN, NOTION_DATABASE_ID, OPENWEATHER_API_KEY, WEATHER_CITY, WEATHER_COUNTRY } = process.env;
 
             const API_URL = `https://api.openweathermap.org/data/2.5/weather?q=${WEATHER_CITY},${WEATHER_COUNTRY}&units=metric&appid=${OPENWEATHER_API_KEY}`;
 
-            // === JST時間取得 ===
+            // === JST時間 ===
             const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
             const time_iso = jst.toISOString();
             const hour = jst.getHours() + jst.getMinutes() / 60;
             const weekdays = ['日', '月', '火', '水', '木', '金', '土'];
             const weekday = weekdays[jst.getDay()];
 
-            // === OpenWeatherから天気情報取得 ===
+            // === OpenWeatherから天気取得 ===
             const res = await fetch(API_URL);
             const weatherData = await res.json();
 
@@ -47,10 +46,10 @@ jobs:
             };
             const weather = weatherMap[weatherMain] || "不明";
 
-            // === mood_seed: 0〜100のランダム数 ===
+            // === mood_seed: 0〜100の乱数 ===
             const mood_seed = Math.floor(Math.random() * 100);
 
-            // === Notionに新しいページを追加 ===
+            // === Notionへ書き込み ===
             const notionRes = await fetch("https://api.notion.com/v1/pages", {
               method: "POST",
               headers: {
@@ -79,4 +78,4 @@ jobs:
               throw new Error(`Notion API error: ${notionRes.status} ${err}`);
             }
 
-            console.log("✅ Heart Engine updated successfully (JST time, real weather).");
+            console.log("✅ Lifrea Heart Engine updated successfully (JST + Real Weather)");
