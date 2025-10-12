@@ -15,10 +15,12 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         with:
-          script: |
-            // JST（日本時間）に変換
-            const now = new Date();
-            now.setHours(now.getHours() + 9);
+        script: |
+            // 基準はUTCの現在時刻
+            const nowUTC = new Date();
+
+            // JST（UTC+9）は hour/weekday 計算だけに使う
+            const jst = new Date(nowUTC.getTime() + 9 * 60 * 60 * 1000);
 
             const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
             const weatherOptions = ['晴れ', '曇り', '雨', '雪'];
@@ -27,27 +29,19 @@ jobs:
             const newPage = {
               parent: { database_id: process.env.NOTION_DATABASE_ID },
               properties: {
-                title: {
-                  title: [{ text: { content: "GitHub Heartbeat" } }]
-                },
-                time_iso: {
-                  date: { start: now.toISOString() }
-                },
-                hour: {
-                  number: now.getHours() + now.getMinutes() / 60
-                },
-                weekday: {
-                  select: { name: weekdayNames[now.getDay()] }
-                },
-                weather: {
-                  select: { name: weatherOptions[Math.floor(Math.random() * weatherOptions.length)] }
-                },
-                temp_c: {
-                  number: 20 + Math.random() * 10
-                },
-                mood_seed: {
-                  number: Math.round(moodSeed * 100)
-                }
+                title: { title: [{ text: { content: "GitHub Heartbeat" } }] },
+                // ★ UTCのまま渡す（Notion側がJST表示に変換）
+                time_iso: { date: { start: nowUTC.toISOString() } },
+
+                // ★ JSTで計算して保存（22.7 = 22:42 など）
+                hour: { number: jst.getHours() + jst.getMinutes() / 60 },
+
+                // ★ JSTの曜日
+                weekday: { select: { name: weekdayNames[jst.getDay()] } },
+
+                weather: { select: { name: weatherOptions[Math.floor(Math.random()*weatherOptions.length)] } },
+                temp_c: { number: 20 + Math.random() * 10 },
+                mood_seed: { number: Math.round(moodSeed * 100) }
               }
             };
 
@@ -65,5 +59,6 @@ jobs:
               const errorData = await response.text();
               core.setFailed(`Notion API error: ${response.status} ${errorData}`);
             } else {
-              core.info("✅ Notion entry created successfully (JST mode)");
+              core.info("✅ Notion entry created successfully (JST hour, UTC ISO)");
             }
+
