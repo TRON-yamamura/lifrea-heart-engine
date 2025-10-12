@@ -1,8 +1,7 @@
 name: Lifrea Heart Engine (update)
+
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 * * * *" # 毎時0分（UTC）＝日本時間で毎時9分ごろ
 
 jobs:
   update:
@@ -13,75 +12,124 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
-          WEATHER_CITY: "Tokyo"      # ← 必ず半角英字。都市名（例: Osaka, Kyoto もOK）
-          WEATHER_COUNTRY: "JP"
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }} # なくても動く
+          CITY_NAME: Tokyo,JP                                    # 変えたければここを変更
         with:
           script: |
-            const { NOTION_TOKEN, NOTION_DATABASE_ID, OPENWEATHER_API_KEY, WEATHER_CITY, WEATHER_COUNTRY } = process.env;
-
-            const API_URL = `https://api.openweathermap.org/data/2.5/weather?q=${WEATHER_CITY},${WEATHER_COUNTRY}&units=metric&appid=${OPENWEATHER_API_KEY}`;
-
-            // === JST時間 ===
-            const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
-            const time_iso = jst.toISOString();
-            const hour = jst.getHours() + jst.getMinutes() / 60;
-            const weekdays = ['日', '月', '火', '水', '木', '金', '土'];
-            const weekday = weekdays[jst.getDay()];
-
-            // === OpenWeatherから天気取得 ===
-            const res = await fetch(API_URL);
-            const weatherData = await res.json();
-
-            if (!res.ok || !weatherData.main) {
-              console.log("⚠️ OpenWeather API error or empty data:", weatherData);
-              throw new Error("Weather data not available. Check city or API key.");
+            // ===== Helper: JST を作る（表示と一致させる） =====
+            function nowJstParts() {
+              const nowUtc = new Date();
+              // JSTはUTC+9時間。内部時刻を+9Hした“擬似UTC”として扱い、UTC系getterで各要素を取る。
+              const jst = new Date(nowUtc.getTime() + 9 * 60 * 60 * 1000);
+              const Y = jst.getUTCFullYear();
+              const M = String(jst.getUTCMonth() + 1).padStart(2, '0');
+              const D = String(jst.getUTCDate()).padStart(2, '0');
+              const h = String(jst.getUTCHours()).padStart(2, '0');
+              const m = String(jst.getUTCMinutes()).padStart(2, '0');
+              const s = String(jst.getUTCSeconds()).padStart(2, '0');
+              // Notionの日時はISO8601が無難。JST固定の +09:00 を明示。
+              const isoJst = `${Y}-${M}-${D}T${h}:${m}:${s}+09:00`;
+              const hour = jst.getUTCHours() + jst.getUTCMinutes() / 60;
+              const weekdayIdx = jst.getUTCDay(); // 0(日)〜6(土)
+              const weekdays = ['日','月','火','水','木','金','土'];
+              return { isoJst, hour, weekday: weekdays[weekdayIdx] };
             }
 
-            const temp_c = weatherData.main.temp ?? 0;
-            const weatherMain = (weatherData.weather && weatherData.weather[0]?.main) || "Unknown";
-            const weatherMap = {
-              Clear: "晴れ",
-              Clouds: "曇り",
-              Rain: "雨",
-              Snow: "雪",
-              Drizzle: "霧雨",
-              Thunderstorm: "雷",
-              Mist: "霧",
-              Haze: "靄",
-              Fog: "霧",
-              Smoke: "煙"
-            };
-            const weather = weatherMap[weatherMain] || "不明";
+            // ===== Helper: OpenWeather 取得（任意） =====
+            async function fetchWeatherIfPossible(city, apiKey) {
+              if (!apiKey) return null;
+              const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&units=metric&lang=ja&appid=${apiKey}`;
+              const res = await fetch(url);
+              if (!res.ok) {
+                core.warning(`OpenWeather fetch failed: ${res.status}`);
+                return null;
+              }
+              const data = await res.json();
+              const tempC = typeof data?.main?.temp === 'number' ? data.main.temp : null;
+              const main = data?.weather?.[0]?.main || '';
+              // 英語→Notionのセレクト用 日本語へマッピング
+              const map = {
+                Clear: '晴れ',
+                Clouds: '曇り',
+                Rain: '雨',
+                Drizzle: '霧雨',
+                Snow: '雪',
+                Thunderstorm: '雷',
+                Mist: '霧',
+                Smoke: '煙',
+                Haze: 'もや',
+                Dust: 'ちり',
+                Fog: '霧',
+                Sand: '砂',
+                Ash: '灰',
+                Squall: 'スコール',
+                Tornado: '竜巻'
+              };
+              const weatherJp = map[main] || '晴れ';
+              return { tempC, weatherJp };
+            }
 
-            const mood_seed = Math.floor(Math.random() * 100);
-
-            const notionRes = await fetch("https://api.notion.com/v1/pages", {
-              method: "POST",
-              headers: {
-                "Authorization": `Bearer ${NOTION_TOKEN}`,
-                "Content-Type": "application/json",
-                "Notion-Version": "2022-06-28"
-              },
-              body: JSON.stringify({
-                parent: { database_id: NOTION_DATABASE_ID },
+            // ===== Helper: Notion ページ作成 =====
+            async function createNotionRow({ token, databaseId, title, isoJst, hour, weekday, weather, tempC, moodSeed }) {
+              const headers = {
+                'Authorization': `Bearer ${token}`,
+                'Notion-Version': '2022-06-28',
+                'Content-Type': 'application/json',
+              };
+              const body = {
+                parent: { database_id: databaseId },
                 properties: {
-                  title: {
-                    title: [{ text: { content: "GitHub Heartbeat" } }]
-                  },
-                  time_iso: { date: { start: time_iso } },
-                  hour: { number: hour },
+                  title: { title: [{ text: { content: title } }] },
+                  time_iso: { date: { start: isoJst } },
+                  hour: { number: Number(hour.toFixed(2)) },
                   weekday: { select: { name: weekday } },
-                  weather: { select: { name: weather } },
-                  temp_c: { number: temp_c },
-                  mood_seed: { number: mood_seed }
+                  mood_seed: { number: moodSeed },
                 }
-              })
+              };
+              if (weather) body.properties.weather = { select: { name: weather } };
+              if (typeof tempC === 'number') body.properties.temp_c = { number: Number(tempC.toFixed(1)) };
+
+              const res = await fetch('https://api.notion.com/v1/pages', {
+                method: 'POST',
+                headers, body: JSON.stringify(body)
+              });
+              if (!res.ok) {
+                const t = await res.text();
+                throw new Error(`Notion create failed: ${res.status} - ${t}`);
+              }
+              return await res.json();
+            }
+
+            // ===== Main =====
+            const NOTION_TOKEN = process.env.NOTION_TOKEN;
+            const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
+            if (!NOTION_TOKEN || !NOTION_DATABASE_ID) {
+              throw new Error('NOTION_TOKEN / NOTION_DATABASE_ID が設定されていません。');
+            }
+
+            const { isoJst, hour, weekday } = nowJstParts();
+            const moodSeed = Math.floor(Math.random() * 100);
+
+            let tempC = null;
+            let weatherJp = null;
+            try {
+              const w = await fetchWeatherIfPossible(process.env.CITY_NAME || 'Tokyo,JP', process.env.OPENWEATHER_API_KEY);
+              if (w) { tempC = w.tempC; weatherJp = w.weatherJp; }
+            } catch (e) {
+              core.warning(`Weather skipped: ${String(e)}`);
+            }
+
+            const title = 'GitHub Heartbeat';
+            const created = await createNotionRow({
+              token: NOTION_TOKEN,
+              databaseId: NOTION_DATABASE_ID,
+              title,
+              isoJst,
+              hour,
+              weekday,
+              weather: weatherJp,
+              tempC,
+              moodSeed
             });
 
-            if (!notionRes.ok) {
-              const err = await notionRes.text();
-              throw new Error(`Notion API error: ${notionRes.status} ${err}`);
-            }
-
-            console.log("✅ Lifrea Heart Engine updated successfully (JST + Real Weather)");
+            core.info(`Done. Page id: ${created?.id}`);
