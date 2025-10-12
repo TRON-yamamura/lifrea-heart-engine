@@ -16,9 +16,7 @@ jobs:
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         with:
           script: |
-            const fetch = global.fetch || require('node-fetch');
-
-            // JST（日本時間）へ変換
+            // JST（日本時間）に変換
             const now = new Date();
             now.setHours(now.getHours() + 9);
 
@@ -26,7 +24,6 @@ jobs:
             const weatherOptions = ['晴れ', '曇り', '雨', '雪'];
             const moodSeed = Math.random();
 
-            // 登録データ作成
             const newPage = {
               parent: { database_id: process.env.NOTION_DATABASE_ID },
               properties: {
