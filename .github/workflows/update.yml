@@ -6,17 +6,14 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      # Node.js のセットアップ
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
 
-      # Notion SDK をインストール
       - name: Install dependencies
-        run: npm install @notionhq/client node-fetch@2
+        run: npm install @notionhq/client
 
-      # Lifrea Heart エンジン実行
       - name: Call Lifrea Heart Script
         uses: actions/github-script@v6
         env:
@@ -26,43 +23,35 @@ jobs:
         with:
           script: |
             const { Client } = require("@notionhq/client");
-            const fetch = require("node-fetch");
+            // ★ fetch は github-script が提供するグローバルをそのまま使う
 
             const notion = new Client({ auth: process.env.NOTION_TOKEN });
             const databaseId = process.env.NOTION_DATABASE_ID;
 
-            // JST時間
+            // ==== JST 時刻 ====
             const now = new Date();
-            const jstOffset = 9 * 60 * 60 * 1000;
-            const jstNow = new Date(now.getTime() + jstOffset);
-
-            const timeISO = jstNow.toISOString();
-            const hour = jstNow.getHours() + jstNow.getMinutes() / 60;
+            const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+            const timeISO = jst.toISOString();
+            const hour = jst.getHours() + jst.getMinutes() / 60;
             const weekdays = ["日", "月", "火", "水", "木", "金", "土"];
-            const weekday = weekdays[jstNow.getDay()];
+            const weekday = weekdays[jst.getDay()];
 
-            // 名古屋の天気
+            // ==== 名古屋の天気 ====
             const city = "Nagoya,JP";
             const apiKey = process.env.OPENWEATHER_API_KEY;
-            const weatherUrl = `https://api.openweathermap.org/data/2.5/weather?q=${city}&appid=${apiKey}&units=metric&lang=ja`;
+            const url = `https://api.openweathermap.org/data/2.5/weather?q=${city}&appid=${apiKey}&units=metric&lang=ja`;
 
-            console.log("🌏 Fetching weather for:", city);
-            const res = await fetch(weatherUrl);
-            const weatherData = await res.json();
+            const res = await fetch(url);
+            const data = await res.json();
 
             if (res.status !== 200) {
-              console.log("⚠️ OpenWeather API error:", weatherData);
-              throw new Error(`Weather API failed: ${res.status} ${weatherData.message}`);
+              core.setFailed(`OpenWeather error ${res.status}: ${data?.message || "unknown"}`);
+              throw new Error(`Weather API failed ${res.status}`);
             }
 
-            const weather = weatherData.weather[0].description;
-            const temp_c = weatherData.main.temp;
+            const weather = data.weather?.[0]?.description || "不明";
+            const temp_c = data.main?.temp ?? null;
             const mood_seed = Math.floor(Math.random() * 101);
-
-            console.log("🕒 JST Time:", timeISO);
-            console.log("🌡️ Temp:", temp_c);
-            console.log("☁️ Weather:", weather);
-            console.log("💗 Mood:", mood_seed);
 
             await notion.pages.create({
               parent: { database_id: databaseId },
@@ -77,4 +66,4 @@ jobs:
               },
             });
 
-            console.log("✅ Successfully updated Notion!");
+            console.log("✅ Notion updated:", { timeISO, hour, weekday, weather, temp_c, mood_seed });
