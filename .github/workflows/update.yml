@@ -1,9 +1,11 @@
 name: Lifrea Heart Engine (update)
 
 on:
+  # 手動実行
   workflow_dispatch:
+  # 自動実行（毎時00分）。不要ならこの schedule ブロックを消してOK
   schedule:
-    - cron: "0 * * * *"  # 毎時00分に自動実行
+    - cron: "0 * * * *"
 
 jobs:
   update:
@@ -15,36 +17,41 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         with:
-        script: |
-            // 基準はUTCの現在時刻
+          script: |
+            // === 時刻の扱い ===
+            // 基準は UTC（Notion が表示時に自動で JST 変換してくれる）
             const nowUTC = new Date();
-
-            // JST（UTC+9）は hour/weekday 計算だけに使う
+            // JST は hour と weekday の計算だけに使用（UTC+9）
             const jst = new Date(nowUTC.getTime() + 9 * 60 * 60 * 1000);
 
+            // === 表示まわり ===
             const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
-            const weatherOptions = ['晴れ', '曇り', '雨', '雪'];
-            const moodSeed = Math.random();
+            const weatherOptions = ['晴れ', '曇り', '雨', '雪']; // Notion 側の「選択」にこの名前がある想定（無くても自動追加されます）
 
+            // 小数の hour（例: 22時42分 → 22 + 42/60 = 22.7）
+            const hourNumber = jst.getHours() + jst.getMinutes() / 60;
+
+            // ダミー値（後で天気API等に差し替え予定）
+            const tempC = 20 + Math.random() * 10;               // 20〜30の範囲
+            const moodSeed = Math.round(Math.random() * 100);     // 0〜100の整数
+
+            // === Notion へ作成するページ ===
             const newPage = {
               parent: { database_id: process.env.NOTION_DATABASE_ID },
               properties: {
-                title: { title: [{ text: { content: "GitHub Heartbeat" } }] },
-                // ★ UTCのまま渡す（Notion側がJST表示に変換）
-                time_iso: { date: { start: nowUTC.toISOString() } },
-
-                // ★ JSTで計算して保存（22.7 = 22:42 など）
-                hour: { number: jst.getHours() + jst.getMinutes() / 60 },
-
-                // ★ JSTの曜日
+                title:   { title: [{ text: { content: "GitHub Heartbeat" } }] },
+                // ISO は UTC のまま渡す（Notion が JST で表示してくれる）
+                time_iso:{ date: { start: nowUTC.toISOString() } },
+                // hour と weekday は JST ベース
+                hour:    { number: hourNumber },
                 weekday: { select: { name: weekdayNames[jst.getDay()] } },
-
                 weather: { select: { name: weatherOptions[Math.floor(Math.random()*weatherOptions.length)] } },
-                temp_c: { number: 20 + Math.random() * 10 },
-                mood_seed: { number: Math.round(moodSeed * 100) }
+                temp_c:  { number: tempC },
+                mood_seed: { number: moodSeed }
               }
             };
 
+            // === Notion API 呼び出し ===
             const response = await fetch("https://api.notion.com/v1/pages", {
               method: "POST",
               headers: {
@@ -56,9 +63,8 @@ jobs:
             });
 
             if (!response.ok) {
-              const errorData = await response.text();
-              core.setFailed(`Notion API error: ${response.status} ${errorData}`);
+              const text = await response.text();
+              core.setFailed(`Notion API error: ${response.status} ${text}`);
             } else {
-              core.info("✅ Notion entry created successfully (JST hour, UTC ISO)");
+              core.info("✅ Notion entry created successfully (UTC ISO + JST hour/weekday)");
             }
-
