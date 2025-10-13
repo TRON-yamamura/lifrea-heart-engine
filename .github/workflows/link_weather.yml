@@ -1,25 +1,31 @@
-name: Link Weather Phrases
+name: Link Heart to Weather Phrase
 on:
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   link:
     runs-on: ubuntu-latest
     steps:
       - name: Check required secrets
-        env:
-          MISS: ${{ secrets.NOTION_TOKEN }}|${{ secrets.NOTION_DATABASE_ID }}|${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}
         run: |
-          if [ -z "${MISS%%*|*|*}" ]; then
-            echo "Missing one or more secrets."
-            echo "NOTION_TOKEN=${{ secrets.NOTION_TOKEN:+set }}"
-            echo "NOTION_DATABASE_ID=${{ secrets.NOTION_DATABASE_ID:+set }}"
-            echo "NOTION_WEATHER_PHRASE_DB_ID=${{ secrets.NOTION_WEATHER_PHRASE_DB_ID:+set }}"
+          echo "Checking required secrets..."
+          missing=0
+          for var in NOTION_TOKEN NOTION_DATABASE_ID NOTION_WEATHER_PHRASE_DB_ID; do
+            if [ -z "${!var}" ]; then
+              echo "❌ Missing secret: $var"
+              missing=1
+            else
+              echo "✅ Found secret: $var"
+            fi
+          done
+          if [ $missing -eq 1 ]; then
+            echo "One or more required secrets are missing."
             exit 1
           fi
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_WEATHER_PHRASE_DB_ID: ${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}
 
       - name: Link Heart rows to Weather Phrase Map
         uses: actions/github-script@v6
@@ -54,7 +60,6 @@ jobs:
               return res.json();
             };
 
-            // 1) Phrase Map を全部読み込み（Name をキーにした辞書）
             const phrases = {};
             let cursor = undefined;
             do {
@@ -62,19 +67,16 @@ jobs:
                 body: { page_size: 100, start_cursor: cursor }
               });
               for (const p of q.results) {
-                const nameProp = p.properties?.Name ?? p.properties?.title ?? p.properties?.name;
-                const name = nameProp?.title?.[0]?.plain_text ?? nameProp?.rich_text?.[0]?.plain_text ?? '';
+                const name = p.properties?.Name?.title?.[0]?.plain_text ?? '';
                 if (name) phrases[name] = p.id;
               }
               cursor = q.has_more ? q.next_cursor : undefined;
             } while (cursor);
 
-            // 表記ゆれ吸収マップ（左＝Heart DB の weather、右＝Phrase Map の Name）
             const normMap = new Map([
               ['晴れ', '晴天'],
               ['晴天', '晴天'],
               ['快晴', '晴天'],
-              ['薄曇り', '曇り'],
               ['曇り', '曇り'],
               ['曇りがち', '曇り'],
               ['雲', '曇り'],
@@ -89,7 +91,6 @@ jobs:
 
             const normalize = (w) => normMap.get(w) ?? w;
 
-            // 2) Heart DB の最近の行を取得（直近 100 件、未リンク優先）
             const heartRows = await api(`/databases/${HEART_DB}/query`, {
               body: {
                 page_size: 100,
@@ -102,7 +103,6 @@ jobs:
               const wp = page.properties?.weather;
               const rel = page.properties?.weather_link;
 
-              // 既に relation が埋まっていたらスキップ
               const already = Array.isArray(rel?.relation) && rel.relation.length > 0;
               if (already) { skipped++; continue; }
 
@@ -113,7 +113,6 @@ jobs:
               const phraseId = phrases[key];
               if (!phraseId) { skipped++; continue; }
 
-              // 3) relation weather_link を更新
               await api(`/pages/${page.id}`, {
                 method: 'PATCH',
                 body: {
@@ -125,4 +124,4 @@ jobs:
               linked++;
             }
 
-            core.info(`Linked: ${linked}, Skipped: ${skipped}`);
+            core.info(`✅ Linked: ${linked}, Skipped: ${skipped}`);
