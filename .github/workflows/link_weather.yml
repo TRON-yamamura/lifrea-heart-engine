@@ -1,103 +1,128 @@
 name: Link Weather Phrases
-
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   link:
     runs-on: ubuntu-latest
-    env:
-      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-      NOTION_WEATHER_PHRASE_DB_ID: ${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}
-
     steps:
       - name: Check required secrets
+        env:
+          MISS: ${{ secrets.NOTION_TOKEN }}|${{ secrets.NOTION_DATABASE_ID }}|${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}
         run: |
-          miss=""
-          [ -z "$NOTION_TOKEN" ] && echo "Missing: NOTION_TOKEN" && miss=1
-          [ -z "$NOTION_DATABASE_ID" ] && echo "Missing: NOTION_DATABASE_ID" && miss=1
-          [ -z "$NOTION_WEATHER_PHRASE_DB_ID" ] && echo "Missing: NOTION_WEATHER_PHRASE_DB_ID" && miss=1
-          [ -n "$miss" ] && exit 1 || echo "All secrets present."
+          if [ -z "${MISS%%*|*|*}" ]; then
+            echo "Missing one or more secrets."
+            echo "NOTION_TOKEN=${{ secrets.NOTION_TOKEN:+set }}"
+            echo "NOTION_DATABASE_ID=${{ secrets.NOTION_DATABASE_ID:+set }}"
+            echo "NOTION_WEATHER_PHRASE_DB_ID=${{ secrets.NOTION_WEATHER_PHRASE_DB_ID:+set }}"
+            exit 1
+          fi
 
       - name: Link Heart rows to Weather Phrase Map
         uses: actions/github-script@v6
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          HEART_DB: ${{ secrets.NOTION_DATABASE_ID }}
+          PHRASE_DB: ${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}
         with:
           script: |
-            // --- helpers ---
-            const fetch = global.fetch ?? (await import('node-fetch')).default;
+            const token = process.env.NOTION_TOKEN;
+            const HEART_DB = process.env.HEART_DB;
+            const PHRASE_DB = process.env.PHRASE_DB;
 
-            const NOTION_TOKEN = process.env.NOTION_TOKEN;
-            const HEART_DB = process.env.NOTION_DATABASE_ID;
-            const PHRASE_DB = process.env.NOTION_WEATHER_PHRASE_DB_ID;
-
-            const NOTION_API = "https://api.notion.com/v1";
-            const headers = {
-              "Authorization": `Bearer ${NOTION_TOKEN}`,
-              "Notion-Version": "2022-06-28",
-              "Content-Type": "application/json",
+            const H = {
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                'Notion-Version': '2022-06-28'
+              }
             };
 
-            async function query(dbId, filter) {
-              const res = await fetch(`${NOTION_API}/databases/${dbId}/query`, {
-                method: "POST",
-                headers,
-                body: JSON.stringify(filter ?? {})
+            const api = async (path, {method='POST', body} = {}) => {
+              const res = await fetch(`https://api.notion.com/v1${path}`, {
+                method,
+                headers: H.headers,
+                body: body ? JSON.stringify(body) : undefined
               });
-              const body = await res.json();
               if (!res.ok) {
-                core.error(`Query error: ${res.status} ${JSON.stringify(body)}`);
-                throw new Error(`Notion query failed: ${res.status}`);
+                const t = await res.text();
+                throw new Error(`HTTP ${res.status} on ${path}: ${t}`);
               }
-              return body.results ?? [];
-            }
+              return res.json();
+            };
 
-            async function updatePage(pageId, props) {
-              const res = await fetch(`${NOTION_API}/pages/${pageId}`, {
-                method: "PATCH",
-                headers,
-                body: JSON.stringify({ properties: props })
+            // 1) Phrase Map を全部読み込み（Name をキーにした辞書）
+            const phrases = {};
+            let cursor = undefined;
+            do {
+              const q = await api(`/databases/${PHRASE_DB}/query`, {
+                body: { page_size: 100, start_cursor: cursor }
               });
-              const body = await res.json();
-              if (!res.ok) {
-                core.error(`Update error: ${res.status} ${JSON.stringify(body)}`);
-                throw new Error(`Notion update failed: ${res.status}`);
+              for (const p of q.results) {
+                const nameProp = p.properties?.Name ?? p.properties?.title ?? p.properties?.name;
+                const name = nameProp?.title?.[0]?.plain_text ?? nameProp?.rich_text?.[0]?.plain_text ?? '';
+                if (name) phrases[name] = p.id;
               }
-              return body;
-            }
+              cursor = q.has_more ? q.next_cursor : undefined;
+            } while (cursor);
 
-            // 1) Weather Phrase Map を全部取得（キー＝タイトル）
-            const phrases = await query(PHRASE_DB);
-            const titleText = (prop) =>
-              (prop?.title?.[0]?.plain_text ?? prop?.rich_text?.[0]?.plain_text ?? "").trim();
+            // 表記ゆれ吸収マップ（左＝Heart DB の weather、右＝Phrase Map の Name）
+            const normMap = new Map([
+              ['晴れ', '晴天'],
+              ['晴天', '晴天'],
+              ['快晴', '晴天'],
+              ['薄曇り', '曇り'],
+              ['曇り', '曇り'],
+              ['曇りがち', '曇り'],
+              ['雲', '曇り'],
+              ['厚い雲', '厚い雲'],
+              ['雨', '雨'],
+              ['小雨', '小雨'],
+              ['雷雨', '雷雨'],
+              ['雪', '雪'],
+              ['霧', '霧'],
+              ['にわか雨', '小雨'],
+            ]);
 
-            const phraseByKey = new Map();
-            for (const p of phrases) {
-              const key = titleText(p.properties?.Name ?? p.properties?.title);
-              if (key) phraseByKey.set(key, p);
-            }
+            const normalize = (w) => normMap.get(w) ?? w;
 
-            // 2) Heart DB の直近50件を取得（必要なら増やせます）
-            const hearts = await query(HEART_DB, { page_size: 50 });
+            // 2) Heart DB の最近の行を取得（直近 100 件、未リンク優先）
+            const heartRows = await api(`/databases/${HEART_DB}/query`, {
+              body: {
+                page_size: 100,
+                sorts: [{ property: 'time_iso', direction: 'descending' }]
+              }
+            });
 
-            // 3) weather→一致するフレーズページを relation 設定
-            for (const row of hearts) {
-              const props = row.properties || {};
-              const weather = props.weather?.select?.name || props.weather?.select?.name_jp || "";
-              if (!weather) continue;
+            let linked = 0, skipped = 0;
+            for (const page of heartRows.results) {
+              const wp = page.properties?.weather;
+              const rel = page.properties?.weather_link;
 
-              const match = phraseByKey.get(weather);
-              if (!match) continue;
+              // 既に relation が埋まっていたらスキップ
+              const already = Array.isArray(rel?.relation) && rel.relation.length > 0;
+              if (already) { skipped++; continue; }
 
-              const already = (props.weather_link?.relation ?? [])
-                .some(r => r.id === match.id);
-              if (already) continue;
+              const weather = wp?.select?.name;
+              if (!weather) { skipped++; continue; }
 
-              await updatePage(row.id, {
-                weather_link: {
-                  relation: [{ id: match.id }]
+              const key = normalize(weather);
+              const phraseId = phrases[key];
+              if (!phraseId) { skipped++; continue; }
+
+              // 3) relation weather_link を更新
+              await api(`/pages/${page.id}`, {
+                method: 'PATCH',
+                body: {
+                  properties: {
+                    weather_link: { relation: [{ id: phraseId }] }
+                  }
                 }
               });
+              linked++;
             }
 
-            core.info("Linking finished.");
+            core.info(`Linked: ${linked}, Skipped: ${skipped}`);
