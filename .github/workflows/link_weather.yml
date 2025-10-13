@@ -1,127 +1,141 @@
 name: Link Heart to Weather Phrase
+
 on:
   workflow_dispatch:
 
 jobs:
   link:
     runs-on: ubuntu-latest
+
     steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Notion SDK
+        run: npm i @notionhq/client
+
       - name: Check required secrets
         run: |
-          echo "Checking required secrets..."
-          missing=0
-          for var in NOTION_TOKEN NOTION_DATABASE_ID NOTION_WEATHER_PHRASE_DB_ID; do
-            if [ -z "${!var}" ]; then
-              echo "❌ Missing secret: $var"
-              missing=1
-            else
-              echo "✅ Found secret: $var"
-            fi
-          done
-          if [ $missing -eq 1 ]; then
-            echo "One or more required secrets are missing."
-            exit 1
-          fi
+          miss=""
+          [ -z "${{ secrets.NOTION_TOKEN }}" ] && echo "Missing: NOTION_TOKEN" && miss=1
+          [ -z "${{ secrets.NOTION_DATABASE_ID }}" ] && echo "Missing: NOTION_DATABASE_ID" && miss=1
+          [ -z "${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}" ] && echo "Missing: NOTION_WEATHER_PHRASE_DB_ID" && miss=1
+          [ -n "$miss" ] && exit 1 || true
+
+      - name: Link Heart rows to Weather Phrase
         env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          NOTION_WEATHER_PHRASE_DB_ID: ${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}                       # Notion 内部統合のトークン
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}           # Lifrea Heart Data v2 の DB ID
+          NOTION_WEATHER_PHRASE_DB_ID: ${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }} # Weather Phrase Map の DB ID
+        run: |
+          node - <<'NODE'
+          // ====== 設定（プロパティ名は Notion 側と一致させてください）======
+          const HEART_DB_ID = process.env.NOTION_DATABASE_ID;              // Lifrea Heart Data v2
+          const PHRASE_DB_ID = process.env.NOTION_WEATHER_PHRASE_DB_ID;    // Weather Phrase Map
+          const WEATHER_PROP = 'weather';          // Heart 側: 天気(Select)
+          const RELATION_PROP = 'weather_link';    // Heart 側: Phrase DB への Relation
+          const PHRASE_TITLE_PROP = 'title';       // Phrase 側: タイトル(Title)
+          const KEYS_PROP = 'keys';                // Phrase 側: キー(テキスト or マルチセレクト どちらでもOK)
+          // =============================================================
 
-      - name: Link Heart rows to Weather Phrase Map
-        uses: actions/github-script@v6
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          HEART_DB: ${{ secrets.NOTION_DATABASE_ID }}
-          PHRASE_DB: ${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}
-        with:
-          script: |
-            const token = process.env.NOTION_TOKEN;
-            const HEART_DB = process.env.HEART_DB;
-            const PHRASE_DB = process.env.PHRASE_DB;
+          const { Client } = require("@notionhq/client");
+          const notion = new Client({ auth: process.env.NOTION_TOKEN });
 
-            const H = {
-              headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json',
-                'Notion-Version': '2022-06-28'
-              }
-            };
-
-            const api = async (path, {method='POST', body} = {}) => {
-              const res = await fetch(`https://api.notion.com/v1${path}`, {
-                method,
-                headers: H.headers,
-                body: body ? JSON.stringify(body) : undefined
-              });
-              if (!res.ok) {
-                const t = await res.text();
-                throw new Error(`HTTP ${res.status} on ${path}: ${t}`);
-              }
-              return res.json();
-            };
-
-            const phrases = {};
+          async function queryHeartNeedingLink() {
+            const pages = [];
             let cursor = undefined;
             do {
-              const q = await api(`/databases/${PHRASE_DB}/query`, {
-                body: { page_size: 100, start_cursor: cursor }
-              });
-              for (const p of q.results) {
-                const name = p.properties?.Name?.title?.[0]?.plain_text ?? '';
-                if (name) phrases[name] = p.id;
-              }
-              cursor = q.has_more ? q.next_cursor : undefined;
-            } while (cursor);
-
-            const normMap = new Map([
-              ['晴れ', '晴天'],
-              ['晴天', '晴天'],
-              ['快晴', '晴天'],
-              ['曇り', '曇り'],
-              ['曇りがち', '曇り'],
-              ['雲', '曇り'],
-              ['厚い雲', '厚い雲'],
-              ['雨', '雨'],
-              ['小雨', '小雨'],
-              ['雷雨', '雷雨'],
-              ['雪', '雪'],
-              ['霧', '霧'],
-              ['にわか雨', '小雨'],
-            ]);
-
-            const normalize = (w) => normMap.get(w) ?? w;
-
-            const heartRows = await api(`/databases/${HEART_DB}/query`, {
-              body: {
+              const res = await notion.databases.query({
+                database_id: HEART_DB_ID,
+                start_cursor: cursor,
                 page_size: 100,
-                sorts: [{ property: 'time_iso', direction: 'descending' }]
+                filter: {
+                  and: [
+                    { property: RELATION_PROP, relation: { is_empty: true } },
+                    { property: WEATHER_PROP, select: { is_not_empty: true } }
+                  ]
+                },
+                sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
+              });
+              pages.push(...res.results);
+              cursor = res.has_more ? res.next_cursor : undefined;
+            } while (cursor);
+            return pages;
+          }
+
+          async function findPhrasePage(weatherValue) {
+            // ① Title 完全一致
+            try {
+              const res = await notion.databases.query({
+                database_id: PHRASE_DB_ID,
+                filter: { property: PHRASE_TITLE_PROP, title: { equals: weatherValue } },
+                page_size: 1
+              });
+              if (res.results.length) return res.results[0];
+            } catch (_) {}
+
+            // ② keys（テキスト）に包含
+            try {
+              const res = await notion.databases.query({
+                database_id: PHRASE_DB_ID,
+                filter: { property: KEYS_PROP, rich_text: { contains: weatherValue } },
+                page_size: 1
+              });
+              if (res.results.length) return res.results[0];
+            } catch (_) {}
+
+            // ③ keys（マルチセレクト）に包含
+            try {
+              const res = await notion.databases.query({
+                database_id: PHRASE_DB_ID,
+                filter: { property: KEYS_PROP, multi_select: { contains: weatherValue } },
+                page_size: 1
+              });
+              if (res.results.length) return res.results[0];
+            } catch (_) {}
+
+            // ④ 見つからなければ Title=天気名 で新規作成（暫定運用）
+            const created = await notion.pages.create({
+              parent: { database_id: PHRASE_DB_ID },
+              properties: {
+                [PHRASE_TITLE_PROP]: { title: [{ type: "text", text: { content: weatherValue } }] },
+                // keys はテキストで入れておく（後でUIから整備してもOK）
+                [KEYS_PROP]: { rich_text: [{ type: "text", text: { content: weatherValue } }] }
               }
             });
+            return created;
+          }
 
-            let linked = 0, skipped = 0;
-            for (const page of heartRows.results) {
-              const wp = page.properties?.weather;
-              const rel = page.properties?.weather_link;
+          async function linkHeartToPhrase(heartPageId, phrasePageId) {
+            await notion.pages.update({
+              page_id: heartPageId,
+              properties: {
+                [RELATION_PROP]: { relation: [{ id: phrasePageId }] }
+              }
+            });
+          }
 
-              const already = Array.isArray(rel?.relation) && rel.relation.length > 0;
-              if (already) { skipped++; continue; }
+          (async () => {
+            const targets = await queryHeartNeedingLink();
+            console.log(`Heart rows to link: ${targets.length}`);
 
-              const weather = wp?.select?.name;
-              if (!weather) { skipped++; continue; }
+            for (const page of targets) {
+              const weather = page.properties?.[WEATHER_PROP]?.select?.name || '';
+              if (!weather) continue;
 
-              const key = normalize(weather);
-              const phraseId = phrases[key];
-              if (!phraseId) { skipped++; continue; }
+              const phrase = await findPhrasePage(weather);
+              if (!phrase?.id) {
+                console.log(`No phrase found/created for "${weather}". skip.`);
+                continue;
+              }
 
-              await api(`/pages/${page.id}`, {
-                method: 'PATCH',
-                body: {
-                  properties: {
-                    weather_link: { relation: [{ id: phraseId }] }
-                  }
-                }
-              });
-              linked++;
+              await linkHeartToPhrase(page.id, phrase.id);
+              console.log(`Linked: "${weather}" -> phrase(${phrase.id}) for heart(${page.id})`);
             }
-
-            core.info(`✅ Linked: ${linked}, Skipped: ${skipped}`);
+          })().catch(e => {
+            console.error(e);
+            process.exit(1);
+          });
+          NODE
