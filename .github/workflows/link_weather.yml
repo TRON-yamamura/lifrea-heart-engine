@@ -4,161 +4,100 @@ on:
   workflow_dispatch:
 
 jobs:
-  link-weather:
+  link:
     runs-on: ubuntu-latest
+    env:
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+      NOTION_WEATHER_PHRASE_DB_ID: ${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}
 
     steps:
       - name: Check required secrets
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const required = [
-              'NOTION_TOKEN',
-              'NOTION_DATABASE_ID',             // Lifrea Heart Data v2（Heart DB）
-              'NOTION_WEATHER_PHRASE_DB_ID'     // Weather Phrase Map
-            ];
-            let ok = true;
-            for (const k of required) {
-              if (!process.env[k] || process.env[k].trim() === '') {
-                core.warning(`Missing secret: ${k}`);
-                ok = false;
-              } else {
-                core.info(`✅ ${k} is set (len=${process.env[k].length})`);
-              }
-            }
-            if (!ok) {
-              throw new Error('One or more required secrets are missing.');
-            }
+        run: |
+          miss=""
+          [ -z "$NOTION_TOKEN" ] && echo "Missing: NOTION_TOKEN" && miss=1
+          [ -z "$NOTION_DATABASE_ID" ] && echo "Missing: NOTION_DATABASE_ID" && miss=1
+          [ -z "$NOTION_WEATHER_PHRASE_DB_ID" ] && echo "Missing: NOTION_WEATHER_PHRASE_DB_ID" && miss=1
+          [ -n "$miss" ] && exit 1 || echo "All secrets present."
 
       - name: Link Heart rows to Weather Phrase Map
         uses: actions/github-script@v6
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          HEART_DB_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          PHRASE_DB_ID: ${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}
         with:
           script: |
-            const token = process.env.NOTION_TOKEN;
-            const HEART_DB_ID = process.env.HEART_DB_ID;
-            const PHRASE_DB_ID = process.env.PHRASE_DB_ID;
+            // --- helpers ---
+            const fetch = global.fetch ?? (await import('node-fetch')).default;
 
-            const base = 'https://api.notion.com/v1';
+            const NOTION_TOKEN = process.env.NOTION_TOKEN;
+            const HEART_DB = process.env.NOTION_DATABASE_ID;
+            const PHRASE_DB = process.env.NOTION_WEATHER_PHRASE_DB_ID;
+
+            const NOTION_API = "https://api.notion.com/v1";
             const headers = {
-              'Authorization': `Bearer ${token}`,
-              'Notion-Version': '2022-06-28',
-              'Content-Type': 'application/json'
+              "Authorization": `Bearer ${NOTION_TOKEN}`,
+              "Notion-Version": "2022-06-28",
+              "Content-Type": "application/json",
             };
 
-            async function notionQuery(dbId, body) {
-              const res = await fetch(`${base}/databases/${dbId}/query`, {
-                method: 'POST',
+            async function query(dbId, filter) {
+              const res = await fetch(`${NOTION_API}/databases/${dbId}/query`, {
+                method: "POST",
                 headers,
-                body: JSON.stringify(body || {})
+                body: JSON.stringify(filter ?? {})
               });
+              const body = await res.json();
               if (!res.ok) {
-                const t = await res.text();
-                core.info(t);
-                throw new Error(`Query failed ${res.status}`);
+                core.error(`Query error: ${res.status} ${JSON.stringify(body)}`);
+                throw new Error(`Notion query failed: ${res.status}`);
               }
-              return res.json();
+              return body.results ?? [];
             }
 
-            async function notionPatchPage(pageId, properties) {
-              const res = await fetch(`${base}/pages/${pageId}`, {
-                method: 'PATCH',
+            async function updatePage(pageId, props) {
+              const res = await fetch(`${NOTION_API}/pages/${pageId}`, {
+                method: "PATCH",
                 headers,
-                body: JSON.stringify({ properties })
+                body: JSON.stringify({ properties: props })
               });
+              const body = await res.json();
               if (!res.ok) {
-                const t = await res.text();
-                core.info(t);
-                throw new Error(`Patch failed ${res.status}`);
+                core.error(`Update error: ${res.status} ${JSON.stringify(body)}`);
+                throw new Error(`Notion update failed: ${res.status}`);
               }
-              return res.json();
+              return body;
             }
 
-            // Heart DB から「weather_link が未設定」かつ「weather が空でない」ページを取得
-            async function* iterateHeartTargets() {
-              let cursor = undefined;
-              do {
-                const body = {
-                  page_size: 100,
-                  start_cursor: cursor,
-                  filter: {
-                    and: [
-                      { property: 'weather_link', relation: { is_empty: true } },
-                      { property: 'weather', select: { is_not_empty: true } }
-                    ]
-                  },
-                  sorts: [{ property: 'time_iso', direction: 'descending' }]
-                };
-                const r = await notionQuery(HEART_DB_ID, body);
-                for (const page of r.results) yield page;
-                cursor = r.has_more ? r.next_cursor : undefined;
-              } while (cursor);
+            // 1) Weather Phrase Map を全部取得（キー＝タイトル）
+            const phrases = await query(PHRASE_DB);
+            const titleText = (prop) =>
+              (prop?.title?.[0]?.plain_text ?? prop?.rich_text?.[0]?.plain_text ?? "").trim();
+
+            const phraseByKey = new Map();
+            for (const p of phrases) {
+              const key = titleText(p.properties?.Name ?? p.properties?.title);
+              if (key) phraseByKey.set(key, p);
             }
 
-            // Phrase Map から、タイトル（Name）が weather 名と一致するレコードを引く
-            async function findPhrasePageIdByWeatherName(name) {
-              const r = await notionQuery(PHRASE_DB_ID, {
-                page_size: 1,
-                filter: {
-                  property: 'Name',
-                  title: { equals: name }
-                }
-              });
-              return r.results?.[0]?.id || null;
-            }
+            // 2) Heart DB の直近50件を取得（必要なら増やせます）
+            const hearts = await query(HEART_DB, { page_size: 50 });
 
-            // 安全に 429 を避けるためのスリープ
-            const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+            // 3) weather→一致するフレーズページを relation 設定
+            for (const row of hearts) {
+              const props = row.properties || {};
+              const weather = props.weather?.select?.name || props.weather?.select?.name_jp || "";
+              if (!weather) continue;
 
-            let updated = 0;
-            let skipped = 0;
+              const match = phraseByKey.get(weather);
+              if (!match) continue;
 
-            for await (const page of iterateHeartTargets()) {
-              const pid = page.id;
-              const props = page.properties || {};
+              const already = (props.weather_link?.relation ?? [])
+                .some(r => r.id === match.id);
+              if (already) continue;
 
-              const weatherSelect = props?.weather?.select;
-              const weatherName = weatherSelect?.name;
-
-              if (!weatherName) {
-                core.info(`⏭️  ${pid}: weather is empty, skip`);
-                skipped++;
-                continue;
-              }
-
-              // 例：Heart の weather が「晴天」「厚い雲」「曇り」「雨」など
-              // Phrase Map 側のタイトル(Name)と一致させる
-              const phraseId = await findPhrasePageIdByWeatherName(weatherName);
-
-              if (!phraseId) {
-                core.info(`⚠️  No phrase found for weather "${weatherName}"`);
-                skipped++;
-                continue;
-              }
-
-              // relation 更新
-              await notionPatchPage(pid, {
+              await updatePage(row.id, {
                 weather_link: {
-                  relation: [{ id: phraseId }]
+                  relation: [{ id: match.id }]
                 }
               });
-
-              updated++;
-              core.info(`🔗 Linked: weather="${weatherName}" -> phraseId=${phraseId} (page=${pid})`);
-
-              // 速すぎると 429 を踏むことがあるので少し待つ
-              await sleep(120);
             }
 
-            core.summary
-              .addHeading('Link Weather Phrases — Result')
-              .addTable([
-                [{ data: 'Updated', header: true }, String(updated)],
-                [{ data: 'Skipped', header: true }, String(skipped)]
-              ])
-              .write();
-
-            core.info(`✅ Done. updated=${updated}, skipped=${skipped}`);
+            core.info("Linking finished.");
