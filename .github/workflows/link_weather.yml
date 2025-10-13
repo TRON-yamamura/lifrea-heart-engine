@@ -1,0 +1,104 @@
+# .github/workflows/update.yml の jobs: … の中の最後にこの job を足す
+# もしくはこの YAML を丸ごと .github/workflows/link_weather.yml として保存してもOK
+name: Lifrea Heart Engine (link phrases)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # 30分ごと
+  workflow_dispatch:         # 手動実行も可
+
+jobs:
+  link_weather_phrase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Link Heart rows to Weather Phrase Map
+        uses: actions/github-script@v6
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          HEART_DB_ID: ${{ secrets.HEART_DB_ID }}        # Lifrea Heart Data v2 の DB ID
+          PHRASE_DB_ID: ${{ secrets.PHRASE_DB_ID }}      # Weather Phrase Map の DB ID
+        with:
+          script: |
+            const token = process.env.NOTION_TOKEN;
+            const HEART_DB = process.env.HEART_DB_ID;
+            const PHRASE_DB = process.env.PHRASE_DB_ID;
+
+            const notion = (path, init={}) =>
+              fetch(`https://api.notion.com/v1${path}`, {
+                ...init,
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Content-Type': 'application/json',
+                  'Notion-Version': '2022-06-28',
+                  ...(init.headers||{})
+                }
+              }).then(async r => {
+                const body = await r.json().catch(()=> ({}));
+                if (!r.ok) throw new Error(`${r.status}: ${JSON.stringify(body)}`);
+                return body;
+              });
+
+            // 最新の行のうち、weather は入っていて weather_link が空のものだけ処理
+            const heart = await notion(`/databases/${HEART_DB}/query`, {
+              method: 'POST',
+              body: JSON.stringify({
+                sorts: [{ property: 'time_iso', direction: 'descending'}],
+                page_size: 50,
+                filter: {
+                  and: [
+                    { property: 'weather', select: { is_not_empty: true } },
+                    { property: 'weather_link', relation: { is_empty: true } }
+                  ]
+                }
+              })
+            });
+
+            // Heart 側の weather（日本語表記いろいろ）→ Phrase Map 側 keys への正規化
+            const normalize = (w) => {
+              if(!w) return null;
+              const s = String(w).replace(/\s/g,'');
+              if (/晴/.test(s)) return '晴天';            // 晴れ/晴天 → 晴天
+              if (/雷/.test(s)) return '雷雨';
+              if (/小雨|にわか|弱い雨/.test(s)) return '小雨';
+              if (/雨/.test(s)) return '雨';
+              if (/厚い雲|どんより|曇りがち/.test(s)) return '厚い雲';
+              if (/曇|雲/.test(s)) return '曇り';
+              if (/雪/.test(s)) return '雪';
+              return s; // 未対応はそのまま
+            };
+
+            let linked = 0;
+            for (const row of heart.results) {
+              const pageId = row.id;
+              const wName = row.properties?.weather?.select?.name;
+              const key = normalize(wName);
+              if (!key) { core.warning(`weather 未設定/未対応: ${wName}`); continue; }
+
+              // Phrase Map を keys で検索
+              const phraseRes = await notion(`/databases/${PHRASE_DB}/query`, {
+                method:'POST',
+                body: JSON.stringify({
+                  filter: { property: 'keys', rich_text: { equals: key } },
+                  page_size: 1
+                })
+              });
+
+              const phrase = phraseRes.results?.[0];
+              if (!phrase) {
+                core.warning(`Phrase not found for key="${key}" (weather="${wName}")`);
+                continue;
+              }
+
+              // relation を張る
+              await notion(`/pages/${pageId}`, {
+                method:'PATCH',
+                body: JSON.stringify({
+                  properties: {
+                    weather_link: { relation: [{ id: phrase.id }] }
+                  }
+                })
+              });
+              linked++;
+            }
+
+            core.info(`Linked ${linked} row(s).`);
