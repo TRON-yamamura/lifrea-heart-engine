@@ -8,7 +8,6 @@ on:
 jobs:
   export:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,7 +17,6 @@ jobs:
         with:
           node-version: "20"
 
-      # 👇 ここを修正：不要な 'notionhq' を消して、dayjs を 'dayjs@1.x' に
       - name: Install deps
         run: |
           npm init -y >/dev/null 2>&1 || true
@@ -31,13 +29,14 @@ jobs:
           NOTION_WEATHER_PHRASE_DB_ID: ${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}
         run: |
           node scripts/export_context.mjs
-          test -f today.json || (echo "today.json not found" && exit 1)
+          # ← ここを修正：public/ 配下を確認
+          test -f public/today.json || (echo "public/today.json not found" && ls -la public && exit 1)
 
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
+          publish_dir: public          # ← ここを修正
           publish_branch: gh-pages
           keep_files: true
           enable_jekyll: false
