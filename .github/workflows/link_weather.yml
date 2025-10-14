@@ -1,7 +1,23 @@
 name: Link Heart to Weather Phrase
 
 on:
+  # 手動実行は残す
   workflow_dispatch:
+
+  # 30分ごとに定期実行（UTC基準）
+  schedule:
+    - cron: "*/30 * * * *"
+
+  # Heart 側のワークフロー完了をフックして自動実行
+  workflow_run:
+    workflows:
+      - Lifrea Heart Engine (update)   # ← Actionsに表示されるHeart側ワークフロー名に合わせてください
+    types:
+      - completed
+
+concurrency:
+  group: link-weather
+  cancel-in-progress: false
 
 jobs:
   link:
