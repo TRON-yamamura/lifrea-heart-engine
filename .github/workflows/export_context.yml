@@ -1,39 +1,43 @@
-name: Export Today Context (JSON)
+name: export
 
 on:
-  workflow_run:
-    workflows:
-      - "Lifrea Heart Engine (update)"       # ←Heartのワークフロー名に合わせる
-      - "Link Heart to Weather Phrase"       # フレーズ連携が終わったあとで動けばOK
-    types: [completed]
+  workflow_dispatch: {}
   schedule:
-    - cron: "*/30 * * * *"                   # 念のため30分ごとにも実行
-  workflow_dispatch:
+    - cron: "5 * * * *" # 毎時5分に実行（任意で変更OK）
 
 jobs:
   export:
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name != 'workflow_run' }}
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "20"
 
+      # 👇 ここを修正：不要な 'notionhq' を消して、dayjs を 'dayjs@1.x' に
       - name: Install deps
-        run: npm i notionhq@2.2.10 @notionhq/client@2.2.10 dayjs@1.x
+        run: |
+          npm init -y >/dev/null 2>&1 || true
+          npm i --no-audit --no-fund @notionhq/client@2.2.10 dayjs@1.x
 
       - name: Build today.json
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          HEART_DB_ID: ${{ secrets.NOTION_DATABASE_ID }}                 # Lifrea Heart Data v2 の DB ID
-        run: node scripts/export_context.mjs
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_WEATHER_PHRASE_DB_ID: ${{ secrets.NOTION_WEATHER_PHRASE_DB_ID }}
+        run: |
+          node scripts/export_context.mjs
+          test -f today.json || (echo "today.json not found" && exit 1)
 
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: public
+          publish_dir: .
           publish_branch: gh-pages
+          keep_files: true
+          enable_jekyll: false
