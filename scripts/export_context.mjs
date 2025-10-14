@@ -6,7 +6,7 @@ import tz from "dayjs/plugin/timezone.js";
 dayjs.extend(utc); dayjs.extend(tz);
 
 const notion = new Client({ auth: process.env.NOTION_TOKEN });
-const HEART_DB_ID = process.env.HEART_DB_ID;
+const HEART_DB_ID = process.env.NOTION_DATABASE_ID;
 
 // Notion プロパティ名はあなたの DB に合わせて（ここは今の構成そのまま）
 const PROPS = {
